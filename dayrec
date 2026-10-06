@@ -84,16 +84,20 @@ is_running() {
     [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
 }
 
-# Seconds left until local midnight, so each day gets its own folder.
-secs_to_midnight() {
-    set -- $(date '+%H %M %S')
-    h=${1#0}; m=${2#0}; s=${3#0}
-    echo $((86400 - h * 3600 - m * 60 - s))
+# The date $1 seconds from now (GNU/busybox date -d @N, BSD/macOS date -r N).
+date_in() {
+    t=$(($(date +%s) + $1))
+    date -d "@$t" +%F 2>/dev/null || date -r "$t" +%F
 }
 
-# Runs one ffmpeg until midnight (or until killed). Input wiring depends on SOURCE.
+# The current default output on PulseAudio/PipeWire.
+default_sink() {
+    pactl info 2>/dev/null | sed -n 's/^Default Sink: //p'
+}
+
+# Runs one ffmpeg until killed. Input wiring depends on SOURCE.
 run_ffmpeg() {
-    left=$1; out=$2
+    out=$1
     case $SOURCE in
         mic)
             set -- -f "$FMT" -i "$DEV" -ac 1 ;;
@@ -108,7 +112,7 @@ run_ffmpeg() {
     esac
     # exec: this runs in a backgrounded subshell, and the loop must be able to signal ffmpeg itself.
     exec ffmpeg -nostdin -hide_banner -loglevel error "$@" \
-        -t "$left" -ar "$RATE" -c:a pcm_s16le \
+        -ar "$RATE" -c:a pcm_s16le \
         -f segment -segment_time "$CHUNK" -segment_atclocktime 1 \
         -reset_timestamps 1 -strftime 1 -segment_format wav "$out"
 }
@@ -118,26 +122,46 @@ record_loop() {
     child=
     trap 'stopping=1; [ -n "$child" ] && kill -TERM "$child" 2>/dev/null' INT TERM
     stopping=0
+    # PulseAudio keeps a stream on the monitor it opened, so a switch to headphones
+    # would lose the other side; watch the default output and reopen when it changes.
+    follow=
+    if [ "$FMT" = pulse ] && [ "$SOURCE" != mic ] && [ -z "${DAYREC_SYSTEM_DEVICE:-}" ]; then
+        follow=1
+    fi
     case $SOURCE in
         mic) echo "$(date '+%F %T') recording mic $FMT:$DEV at ${RATE} Hz" ;;
         system) echo "$(date '+%F %T') recording system audio $FMT:$SYSDEV at ${RATE} Hz" ;;
         both) echo "$(date '+%F %T') recording mic $FMT:$DEV (L) + system $FMT:$SYSDEV (R) at ${RATE} Hz" ;;
     esac
     while [ "$stopping" -eq 0 ]; do
-        day="$DIR/$(date +%F)"
-        mkdir -p "$day" || die "cannot create $day"
-        run_ffmpeg "$(secs_to_midnight)" "$day/%H-%M-%S.wav" &
+        mkdir -p "$DIR/$(date +%F)" || die "cannot create $DIR/$(date +%F)"
+        [ -n "$follow" ] && sink=$(default_sink)
+        # ffmpeg puts each file in its day folder itself, so it runs straight through midnight.
+        run_ffmpeg "$DIR/%Y-%m-%d/%H-%M-%S.wav" &
         child=$!
+        # Every 10 s: make sure the folder for a minute from now exists before ffmpeg needs
+        # it, and check the output was not switched. This also paces retries.
+        switched=
+        while :; do
+            mkdir -p "$DIR/$(date_in 60)"
+            sleep 10 &
+            wait $! 2>/dev/null
+            if [ "$stopping" -eq 1 ] || ! kill -0 "$child" 2>/dev/null; then break; fi
+            if [ -n "$follow" ] && [ "$(default_sink)" != "$sink" ]; then
+                echo "$(date '+%F %T') output switched to $(default_sink), reopening"
+                switched=1
+                kill -TERM "$child"
+                break
+            fi
+        done
         wait "$child"; rc=$?
         # wait returns early when a signal arrives; wait again so the WAV headers get written.
         wait "$child" 2>/dev/null
         child=
         [ "$stopping" -eq 1 ] && break
-        if [ "$rc" -ne 0 ]; then
-            # Device vanished or busy: back off and retry instead of dying.
-            echo "$(date '+%F %T') ffmpeg exited ($rc), retrying in 10s"
-            sleep 10 &
-            wait $! 2>/dev/null
+        # Device vanished or busy: the loop above already waited 10 s, so just retry.
+        if [ "$rc" -ne 0 ] && [ -z "$switched" ]; then
+            echo "$(date '+%F %T') ffmpeg exited ($rc), retrying"
         fi
     done
     echo "$(date '+%F %T') stopped"
@@ -162,8 +186,8 @@ transcribe_file() {
         done
         # CSV rows are start_ms,end_ms,"text". Tag each with a speaker, sort by start.
         {
-            tail -n +2 "$tmp/me.csv"   | sed 's/^/Me\t/'
-            tail -n +2 "$tmp/them.csv" | sed 's/^/Them\t/'
+            awk 'NR > 1 { print "Me\t" $0 }' "$tmp/me.csv"
+            awk 'NR > 1 { print "Them\t" $0 }' "$tmp/them.csv"
         } | awk -F'\t' '{ split($2, f, ","); print f[1] "\t" $1 "\t" $2 }' \
           | sort -n -k1,1 \
           | awk -F'\t' '{

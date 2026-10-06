@@ -7,6 +7,8 @@ After=pipewire-pulse.service pulseaudio.service
 
 [Service]
 ExecStart=%h/.local/bin/dayrec run
+# Settings go here, e.g. to record both sides of calls:
+#Environment=DAYREC_SOURCE=both
 Nice=10
 Restart=on-failure
 

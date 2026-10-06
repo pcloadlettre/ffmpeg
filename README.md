@@ -29,8 +29,8 @@ dayrec start
 
 Start automatically:
 
-- **Linux (systemd):** `cp contrib/dayrec.service ~/.config/systemd/user/ && systemctl --user enable --now dayrec`
-- **Anywhere with cron:** `@reboot $HOME/.local/bin/dayrec start` in `crontab -e`
+- **Linux (systemd):** `cp contrib/dayrec.service ~/.config/systemd/user/ && systemctl --user enable --now dayrec`. The service doesn't see your shell's variables, so put settings in the unit as `Environment=` lines (e.g. `Environment=DAYREC_SOURCE=both`).
+- **Elsewhere, with cron:** `@reboot $HOME/.local/bin/dayrec start` in `crontab -e`. On a Linux desktop use the systemd unit instead: at boot there is no audio session yet for cron to record from.
 
 On macOS, grant microphone access to your terminal (or `ffmpeg`) the first time.
 
@@ -42,7 +42,7 @@ By default only the microphone is recorded, so with headphones on the other side
 DAYREC_SOURCE=both dayrec start
 ```
 
-- **Linux (PulseAudio / PipeWire):** works out of the box. "What you hear" comes from the monitor of your current output device, so switching to headphones is handled.
+- **Linux (PulseAudio / PipeWire):** works out of the box. "What you hear" comes from the monitor of your current output device; if you switch output (say, to headphones), dayrec notices within 10 seconds and follows it, starting a new file.
 - **macOS:** the OS cannot capture its own output. Install a free loopback driver such as [BlackHole](https://existential.audio/blackhole/), create a Multi-Output Device in Audio MIDI Setup (your headphones + BlackHole) and select it as system output, then:
   `DAYREC_SOURCE=both DAYREC_SYSTEM_DEVICE=":BlackHole 2ch" dayrec start`
 - `DAYREC_SOURCE=system` records only what you hear.
@@ -100,5 +100,7 @@ Environment variables, all optional:
 ## Resources
 
 It's one `ffmpeg` process writing raw PCM (no encoding), run at `nice 10`. CPU use is well under 1%. Disk: 16 kHz mono 16-bit is about 115 MB/hour, 2.7 GB/day. Hourly chunks keep every file far below the 4 GB WAV limit and mean a crash or power loss costs at most the current hour's header.
+
+`prune` doesn't run on its own. To keep the disk from filling up, schedule it, e.g. `0 3 * * * $HOME/.local/bin/dayrec prune` in `crontab -e`.
 
 If the mic disappears (unplugged, busy), dayrec logs it to `$DAYREC_DIR/.dayrec.log` and retries every 10 seconds.
